@@ -1,0 +1,62 @@
+<?php
+/**
+ * Durable filesystem spool shared by Gallery2, Drupal and the CLI worker.
+ * A single worker processes jobs; each job is an immutable JSON file.
+ *
+ * ART16_G2_SOLR_QUEUE must point to a directory writable by the Gallery2
+ * PHP user and readable/writable by the worker. The directory is NOT public.
+ */
+class Art16SolrQueue {
+    static function directory() {
+        $dir = getenv('ART16_G2_SOLR_QUEUE');
+        return $dir !== false && $dir !== ''
+            ? rtrim($dir, '/') : '/var/lib/art16-gallery2-solr';
+    }
+
+    static function enqueue($kind, $id=0) {
+        if (!in_array($kind, array('item', 'subtree', 'full'), true)) {
+            throw new InvalidArgumentException('Invalid queue operation');
+        }
+        if ($kind != 'full' && (!is_int($id) || $id < 1)) {
+            throw new InvalidArgumentException('Invalid Gallery2 ID');
+        }
+        $dir = self::directory() . '/pending';
+        if (!is_dir($dir) || !is_writable($dir)) {
+            throw new RuntimeException('Queue directory is not writable: ' . $dir);
+        }
+
+        $stamp = sprintf('%013d', (int)(microtime(true) * 1000));
+        $nonce = bin2hex(random_bytes(12));
+        $name = $stamp . '-' . $nonce;
+        $tmp = $dir . '/.' . $name . '.tmp';
+        $path = $dir . '/' . $name . '.json';
+        $payload = json_encode(array(
+            'kind' => $kind, 'id' => $id, 'created' => time(),
+            'attempts' => 0
+        ), JSON_UNESCAPED_SLASHES);
+        $handle = @fopen($tmp, 'x');
+        if (!$handle) {
+            throw new RuntimeException('Cannot create queue entry');
+        }
+        try {
+            if (fwrite($handle, $payload . "\n") !== strlen($payload) + 1 ||
+                !fflush($handle)) {
+                throw new RuntimeException('Cannot write queue entry');
+            }
+            if (function_exists('fsync') && !fsync($handle)) {
+                throw new RuntimeException('Cannot sync queue entry');
+            }
+        } catch (Exception $e) {
+            fclose($handle);
+            @unlink($tmp);
+            throw $e;
+        }
+        fclose($handle);
+        if (!@rename($tmp, $path)) {
+            @unlink($tmp);
+            throw new RuntimeException('Cannot publish queue entry');
+        }
+        return $path;
+    }
+}
+?>
