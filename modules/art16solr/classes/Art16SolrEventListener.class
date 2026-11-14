@@ -1,0 +1,40 @@
+<?php
+/**
+ * Events are emitted before Gallery2 storage commits. Only durable intentions
+ * are written here; the worker must re-read committed Gallery2 state.
+ */
+GalleryCoreApi::requireOnce('modules/core/classes/GalleryEventListener.class');
+GalleryCoreApi::requireOnce('modules/art16solr/classes/Art16SolrQueue.class');
+
+class Art16SolrEventListener extends GalleryEventListener {
+    function handleEvent($event) {
+        try {
+            $name = $event->getEventName();
+            if ($name == 'GalleryEntity::save' || $name == 'GalleryEntity::delete') {
+                $entity = $event->getEntity();
+                if (GalleryUtilities::isA($entity, 'GalleryItem')) {
+                    Art16SolrQueue::enqueue('item', (int)$entity->getId());
+                }
+            } else if ($name == 'Gallery::ViewableTreeChange') {
+                $data = $event->getData();
+                if (!is_array($data) || !isset($data['itemId'])) {
+                    return array(null, null);
+                }
+                $ids = is_array($data['itemId']) ? $data['itemId'] : array($data['itemId']);
+                foreach ($ids as $id) {
+                    if (is_numeric($id) && (int)$id > 0) {
+                        Art16SolrQueue::enqueue('subtree', (int)$id);
+                    }
+                }
+            }
+            return array(null, null);
+        } catch (Exception $e) {
+            // Never silently discard an event: a failed local spool write
+            // makes the Gallery2 operation fail instead of losing the update.
+            return array(GalleryCoreApi::error(
+                ERROR_STORAGE_FAILURE, __FILE__, __LINE__,
+                'ART16 Solr queue: ' . $e->getMessage()), null);
+        }
+    }
+}
+?>
